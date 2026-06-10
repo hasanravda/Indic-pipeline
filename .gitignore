@@ -1,0 +1,56 @@
+## Android / Gradle
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+**/build/
+/captures
+.externalNativeBuild
+.cxx
+**/.cxx/
+local.properties
+*.apk
+*.aab
+*.aar
+*.dex
+*.hprof
+
+## OS / IDE noise
+Thumbs.db
+*.swp
+*.swo
+
+## ============================================================
+## Large model assets - NOT pushed to GitHub.
+## GitHub rejects any single file > 100 MB and the model bundle
+## is several GB. Distribute via Releases / HuggingFace / Drive.
+## ============================================================
+##
+## Rule: ignore everything inside the model folders, then re-allow
+## ONLY the small text/JSON config files needed at build time.
+
+# ASR: ignore everything except config + vocab JSON
+app/src/main/assets/asr/*
+!app/src/main/assets/asr/config.json
+!app/src/main/assets/asr/language_masks.json
+!app/src/main/assets/asr/vocab.json
+
+# Translation: ignore everything except the small dictionary JSON
+# and the SentencePiece tokenizer model (~3 MB)
+app/src/main/assets/trans/*
+!app/src/main/assets/trans/dict.SRC.json
+!app/src/main/assets/trans/dict.TGT.json
+!app/src/main/assets/trans/tokenizer.model
+
+# TTS: ignore each language's model.onnx (~114 MB each), keep tokens.txt
+app/src/main/assets/tts/*/model.onnx
+
+# Generic catch-all so any stray .onnx anywhere never sneaks in
+*.onnx

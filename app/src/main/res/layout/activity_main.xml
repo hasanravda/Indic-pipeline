@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:gravity="center_horizontal">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Real-Time Indic Translator"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="16dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="16dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:layout_marginEnd="8dp">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="You Speak (Source)" android:textStyle="bold"/>
+            <Spinner android:id="@+id/sourceSpinner" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:background="@android:drawable/btn_dropdown"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:layout_marginStart="8dp">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="They Hear (Target)" android:textStyle="bold"/>
+            <Spinner android:id="@+id/targetSpinner" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:background="@android:drawable/btn_dropdown"/>
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/layoutLoading"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:visibility="gone"
+        android:layout_marginBottom="16dp">
+        <ProgressBar android:layout_width="24dp" android:layout_height="24dp" android:layout_marginEnd="8dp"/>
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Loading Models..." />
+    </LinearLayout>
+
+    <TextView android:id="@+id/tvSystemStatus" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Status: Please wait..." android:gravity="center" android:textStyle="italic" android:layout_marginBottom="16dp"/>
+
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginBottom="16dp">
+        <Button android:id="@+id/btnCall" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Start Call" android:backgroundTint="#4CAF50" android:textColor="#FFF" android:layout_marginEnd="4dp"/>
+        <Button android:id="@+id/btnEnd" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="End Call" android:backgroundTint="#F44336" android:textColor="#FFF" android:layout_marginStart="4dp"/>
+    </LinearLayout>
+
+    <Button android:id="@+id/btnBenchmark" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Run Full Dataset Benchmark" android:backgroundTint="#FF9800" android:textColor="#FFF" android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:id="@+id/layoutBenchmarkProgress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:layout_marginBottom="16dp">
+        <TextView android:id="@+id/tvBenchmarkStatus" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Scanning dataset..." android:gravity="center" android:layout_marginBottom="4dp"/>
+        <ProgressBar android:id="@+id/pbBenchmark" style="?android:attr/progressBarStyleHorizontal" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100"/>
+    </LinearLayout>
+
+    <TextView android:id="@+id/tvAsrOutput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Heard: (waiting for voice...)" android:textSize="18sp" android:layout_marginBottom="8dp"/>
+    <TextView android:id="@+id/tvTransOutput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Translated: (waiting for translation...)" android:textSize="18sp" android:textStyle="bold" android:textColor="#2196F3" android:layout_marginBottom="16dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:background="#EEEEEE"
+        android:layout_marginTop="16dp">
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Performance Metrics:" android:textStyle="bold" android:layout_marginBottom="8dp" />
+
+        <TextView android:id="@+id/tvAsrTime" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="ASR Time: -- ms" />
+        <TextView android:id="@+id/tvTransTime" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Translation Time: -- ms" />
+        <TextView android:id="@+id/tvTtsTime" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="TTS Processing Time: -- ms" />
+
+        <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#BDBDBD" android:layout_marginTop="8dp" android:layout_marginBottom="8dp"/>
+
+        <TextView android:id="@+id/tvTotalTime" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Total AI Processing: -- ms" android:textStyle="bold" android:textColor="#D32F2F" />
+    </LinearLayout>
+
+</LinearLayout>
