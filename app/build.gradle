@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace 'com.example.indicpipeline'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId "com.example.indicpipeline"
@@ -33,6 +33,12 @@ android {
         }
     }
 
+    // Models are read directly from assets; keep the very large *.onnx
+    // files uncompressed so onnxruntime can mmap them quickly.
+    androidResources {
+        noCompress 'onnx'
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -56,7 +62,12 @@ android {
 
 dependencies {
     implementation libs.onnxruntime.android
-    implementation libs.sherpa.onnx
+    // sherpa-onnx is not published to Maven Central; use the bundled jar
+    // (native .so files are already in src/main/jniLibs)
+    implementation files('libs/sherpa-onnx-1.13.2.jar')
+    // Vosk (Kaldi) ASR for Hindi & Gujarati; 0.3.75 ships 16 KB aligned natives
+    implementation 'com.alphacephei:vosk-android:0.3.75'
+    implementation 'net.java.dev.jna:jna:5.18.1@aar'
     implementation libs.appcompat
     implementation libs.material
     implementation libs.activity

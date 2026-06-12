@@ -6,14 +6,15 @@ import android.util.Log;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 public class BatchEvaluator {
 
+    private static final String TAG = "BATCH";
     private static final double POWER_KW = 0.005; // 5 Watts
     private static final double CARBON_INTENSITY_G_KWH = 714.0;
 
-    // INTERFACE TO TALK TO THE UI
     public interface BenchmarkCallback {
         void onProgress(int currentFile, int totalFiles, String statusText);
         void onComplete(String finalMessage);
@@ -25,10 +26,23 @@ public class BatchEvaluator {
         return timeHours * POWER_KW * CARBON_INTENSITY_G_KWH;
     }
 
-    public static void runBatchBenchmark(Context context, AsrEngine asrEngine, OfflineTranslator translator, List<LangConfig> allLangs, BenchmarkCallback callback) {
+    /** App-private output dir (no storage permission required on Android 10+). */
+    private static File getBenchmarkOutputRoot(Context context) {
+        File root = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS);
+        if (root == null) {
+            root = context.getFilesDir();
+        }
+        File out = new File(root, "IndicBenchmark");
+        if (!out.exists() && !out.mkdirs()) {
+            Log.w(TAG, "Could not create benchmark dir: " + out.getAbsolutePath());
+        }
+        return out;
+    }
+
+    public static void runBatchBenchmark(Context context, AsrEngine asrEngine, OfflineTranslator translator,
+                                         List<LangConfig> allLangs, BenchmarkCallback callback) {
         new Thread(() -> {
-            File downloadsDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "IndicBenchmark");
-            if (!downloadsDir.exists()) downloadsDir.mkdirs();
+            File downloadsDir = getBenchmarkOutputRoot(context);
 
             try {
                 String[] sourceFolders = context.getAssets().list("test_data");
@@ -37,106 +51,164 @@ public class BatchEvaluator {
                     return;
                 }
 
-                // 1. PRE-CALCULATE TOTAL FILES FOR THE PROGRESS BAR
-                int totalFilesToProcess = 0;
-                for (String srcFolder : sourceFolders) {
-                    LangConfig srcLang = getLangConfigByName(srcFolder, allLangs);
-                    if (srcLang == null) continue;
-
-                    String[] files = context.getAssets().list("test_data/" + srcFolder);
-                    if (files != null) {
-                        int validWavs = 0;
-                        for (String f : files) if (f.toLowerCase().endsWith(".wav")) validWavs++;
-                        // Total = (Valid WAVs) * (Number of TARGET languages minus the source language)
-                        totalFilesToProcess += validWavs * (allLangs.size() - 1);
+                // Only languages with ASR + TTS models on disk
+                List<LangConfig> supportedLangs = new ArrayList<>();
+                for (LangConfig lang : allLangs) {
+                    if (ModelAvailability.isLanguageFullySupported(context, lang)) {
+                        supportedLangs.add(lang);
+                    } else {
+                        Log.i(TAG, "Skipping unsupported language: " + lang.name
+                                + " (ASR=" + ModelAvailability.hasAsrModel(context, lang.asrCode)
+                                + ", TTS=" + ModelAvailability.hasTtsModel(context, lang.ttsFolder) + ")");
                     }
                 }
 
+                if (supportedLangs.isEmpty()) {
+                    callback.onError("No languages with both ASR and TTS models found in assets.");
+                    return;
+                }
+
+                if (translator == null) {
+                    callback.onError("Translation engine is not loaded.");
+                    return;
+                }
+
+                int totalFilesToProcess = 0;
+                List<String> runnableSources = new ArrayList<>();
+
+                for (String srcFolder : sourceFolders) {
+                    LangConfig srcLang = getLangConfigByName(srcFolder, supportedLangs);
+                    if (srcLang == null) continue;
+                    if (!ModelAvailability.hasAsrModel(context, srcLang.asrCode)) continue;
+
+                    String[] files = context.getAssets().list("test_data/" + srcFolder);
+                    if (files == null) continue;
+
+                    int validWavs = 0;
+                    for (String f : files) {
+                        if (f.toLowerCase().endsWith(".wav")) validWavs++;
+                    }
+                    if (validWavs == 0) continue;
+
+                    runnableSources.add(srcFolder);
+                    int targetCount = 0;
+                    for (LangConfig tgt : supportedLangs) {
+                        if (!srcLang.name.equalsIgnoreCase(tgt.name)
+                                && ModelAvailability.hasTtsModel(context, tgt.ttsFolder)) {
+                            targetCount++;
+                        }
+                    }
+                    totalFilesToProcess += validWavs * targetCount;
+                }
+
                 if (totalFilesToProcess == 0) {
-                    callback.onError("No .wav files found inside the test_data language folders.");
+                    callback.onError("No benchmark pairs found. Add .wav files under test_data/hindi, "
+                            + "test_data/gujarati, or test_data/bengali.");
                     return;
                 }
 
                 int filesProcessed = 0;
+                int pairsRun = 0;
+                int pairsSkipped = 0;
 
-                // 2. RUN THE ACTUAL BENCHMARK
-                for (String srcFolderName : sourceFolders) {
-                    LangConfig srcLang = getLangConfigByName(srcFolderName, allLangs);
+                for (String srcFolderName : runnableSources) {
+                    LangConfig srcLang = getLangConfigByName(srcFolderName, supportedLangs);
                     if (srcLang == null) continue;
 
                     String[] audioFiles = context.getAssets().list("test_data/" + srcFolderName);
                     if (audioFiles == null || audioFiles.length == 0) continue;
 
-                    for (LangConfig tgtLang : allLangs) {
+                    for (LangConfig tgtLang : supportedLangs) {
                         if (srcLang.name.equalsIgnoreCase(tgtLang.name)) continue;
+                        if (!ModelAvailability.hasTtsModel(context, tgtLang.ttsFolder)) {
+                            pairsSkipped++;
+                            continue;
+                        }
 
                         String pairName = srcFolderName.toLowerCase() + "_to_" + tgtLang.name.toLowerCase();
-
                         File outputFolder = new File(downloadsDir, pairName);
-                        if (!outputFolder.exists()) outputFolder.mkdirs();
+                        if (!outputFolder.exists() && !outputFolder.mkdirs()) {
+                            Log.e(TAG, "Cannot create output folder: " + outputFolder.getAbsolutePath());
+                            pairsSkipped++;
+                            continue;
+                        }
 
                         File reportFile = new File(downloadsDir, pairName + "_report.txt");
 
+                        TtsEngine ttsEngine = null;
                         try (FileWriter writer = new FileWriter(reportFile, false)) {
                             writer.write("=== BENCHMARK REPORT: " + pairName.toUpperCase() + " ===\n\n");
-
-                            TtsEngine ttsEngine = new TtsEngine(context, null, tgtLang.ttsFolder);
+                            ttsEngine = new TtsEngine(context, null, tgtLang.ttsFolder);
+                            pairsRun++;
 
                             for (String audioFile : audioFiles) {
                                 if (!audioFile.toLowerCase().endsWith(".wav")) continue;
 
-                                // UPDATE PROGRESS BAR
                                 filesProcessed++;
-                                callback.onProgress(filesProcessed, totalFilesToProcess, "Processing: " + pairName + " (" + audioFile + ")");
+                                callback.onProgress(filesProcessed, totalFilesToProcess,
+                                        "Processing: " + pairName + " (" + audioFile + ")");
 
                                 writer.write("File: " + audioFile + "\n");
 
-                                InputStream is = context.getAssets().open("test_data/" + srcFolderName + "/" + audioFile);
-                                short[] pcm = WavUtil.readWavFromStream(is);
+                                try (InputStream is = context.getAssets().open(
+                                        "test_data/" + srcFolderName + "/" + audioFile)) {
+                                    short[] pcm = WavUtil.readWavFromStream(is);
 
-                                long asrStart = System.currentTimeMillis();
-                                AsrEngine.Result asrRes = asrEngine.transcribe(pcm, srcLang.asrCode);
-                                long asrTime = System.currentTimeMillis() - asrStart;
+                                    long asrStart = System.currentTimeMillis();
+                                    AsrEngine.Result asrRes = asrEngine.transcribe(pcm, srcLang.asrCode);
+                                    long asrTime = System.currentTimeMillis() - asrStart;
 
-                                long transStart = System.currentTimeMillis();
-                                String transStr = translator.translate(asrRes.text, srcLang.transCode, tgtLang.transCode);
-                                long transTime = System.currentTimeMillis() - transStart;
+                                    long transStart = System.currentTimeMillis();
+                                    String transStr = translator.translate(
+                                            asrRes.text, srcLang.transCode, tgtLang.transCode);
+                                    long transTime = System.currentTimeMillis() - transStart;
 
-                                long ttsTime = 0;
-                                try {
-                                    TtsEngine.TtsResult ttsRes = ttsEngine.synthesizeToFile(transStr);
-                                    if (ttsRes != null) {
-                                        ttsTime = ttsRes.timeMs;
-                                        File outWav = new File(outputFolder, audioFile);
-                                        WavUtil.writeWav(ttsRes.audioData, outWav);
+                                    long ttsTime = 0;
+                                    try {
+                                        TtsEngine.TtsResult ttsRes = ttsEngine.synthesizeToFile(transStr);
+                                        if (ttsRes != null) {
+                                            ttsTime = ttsRes.timeMs;
+                                            File outWav = new File(outputFolder, audioFile);
+                                            WavUtil.writeWav(ttsRes.audioData, outWav);
+                                        }
+                                    } catch (Exception e) {
+                                        Log.e(TAG, "TTS failed for " + audioFile, e);
                                     }
-                                } catch (Exception e) {
-                                    Log.e("BATCH", "TTS failed for " + audioFile);
+
+                                    long totalTime = asrTime + transTime + ttsTime;
+                                    double asrCo2 = calculateCarbon(asrTime);
+                                    double transCo2 = calculateCarbon(transTime);
+                                    double ttsCo2 = calculateCarbon(ttsTime);
+                                    double totalCo2 = asrCo2 + transCo2 + ttsCo2;
+
+                                    writer.write(String.format("Transcription: %s\n", asrRes.text));
+                                    writer.write(String.format("Translation:   %s\n", transStr));
+                                    writer.write(String.format("Times (ms):    ASR=%d, Trans=%d, TTS=%d, Total=%d\n",
+                                            asrTime, transTime, ttsTime, totalTime));
+                                    writer.write(String.format(
+                                            "Carbon (gCO2): ASR=%.6f, Trans=%.6f, TTS=%.6f, Total=%.6f\n",
+                                            asrCo2, transCo2, ttsCo2, totalCo2));
+                                    writer.write("--------------------------------------------------\n");
                                 }
-
-                                long totalTime = asrTime + transTime + ttsTime;
-
-                                double asrCo2 = calculateCarbon(asrTime);
-                                double transCo2 = calculateCarbon(transTime);
-                                double ttsCo2 = calculateCarbon(ttsTime);
-                                double totalCo2 = asrCo2 + transCo2 + ttsCo2;
-
-                                writer.write(String.format("Transcription: %s\n", asrRes.text));
-                                writer.write(String.format("Translation:   %s\n", transStr));
-                                writer.write(String.format("Times (ms):    ASR=%d, Trans=%d, TTS=%d, Total=%d\n", asrTime, transTime, ttsTime, totalTime));
-                                writer.write(String.format("Carbon (gCO2): ASR=%.6f, Trans=%.6f, TTS=%.6f, Total=%.6f\n", asrCo2, transCo2, ttsCo2, totalCo2));
-                                writer.write("--------------------------------------------------\n");
                             }
-                            ttsEngine.close();
                             writer.write("End of Pair Matrix Report.");
                         } catch (Exception e) {
-                            Log.e("BATCH", "Failed writing report for " + pairName, e);
+                            Log.e(TAG, "Failed benchmark pair " + pairName, e);
+                            pairsSkipped++;
+                        } finally {
+                            if (ttsEngine != null) ttsEngine.close();
                         }
                     }
                 }
-                // FINAL SUCCESS CALLBACK
-                callback.onComplete("Benchmark Complete! Data saved to Downloads/IndicBenchmark");
+
+                String msg = "Benchmark complete! " + pairsRun + " language pair(s) processed";
+                if (pairsSkipped > 0) {
+                    msg += ", " + pairsSkipped + " skipped (missing models or write error)";
+                }
+                msg += ".\nSaved to: " + downloadsDir.getAbsolutePath();
+                callback.onComplete(msg);
             } catch (Exception e) {
+                Log.e(TAG, "Critical benchmark failure", e);
                 callback.onError("Critical benchmark failure: " + e.getMessage());
             }
         }).start();

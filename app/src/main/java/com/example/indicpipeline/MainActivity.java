@@ -111,6 +111,16 @@ public class MainActivity extends AppCompatActivity {
             public void onNothingSelected(AdapterView<?> parent) {}
         });
 
+        sourceSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (isInitialBoot) return;
+                swapAsrModel(languages.get(position).asrCode);
+            }
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+
         btnCall.setOnClickListener(v -> startCall());
         btnEnd.setOnClickListener(v -> endCall());
 
@@ -140,9 +150,11 @@ public class MainActivity extends AppCompatActivity {
                 long t0 = System.currentTimeMillis();
 
                 // Start ASR and Translation loading in parallel
+                final LangConfig defaultSrc = (LangConfig) sourceSpinner.getSelectedItem();
                 Thread tAsr = new Thread(() -> {
                     try {
                         asrEngine = new AsrEngine(this, sharedEnv);
+                        asrEngine.setLanguage(defaultSrc.asrCode);
                     } catch (Exception e) {
                         Log.e("BOOT", "Failed to load ASR Engine", e);
                     }
@@ -188,6 +200,23 @@ public class MainActivity extends AppCompatActivity {
                 e.printStackTrace();
                 runOnUiThread(() -> tvSystemStatus.setText("Error loading models!"));
             }
+        }).start();
+    }
+
+    private void swapAsrModel(String asrCode) {
+        layoutLoading.setVisibility(View.VISIBLE);
+        btnCall.setEnabled(false);
+        tvSystemStatus.setText("Loading ASR Model...");
+
+        new Thread(() -> {
+            try {
+                if (asrEngine != null) asrEngine.setLanguage(asrCode);
+                runOnUiThread(() -> {
+                    layoutLoading.setVisibility(View.GONE);
+                    tvSystemStatus.setText("System Ready.");
+                    btnCall.setEnabled(true);
+                });
+            } catch (Exception e) { e.printStackTrace(); }
         }).start();
     }
 

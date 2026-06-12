@@ -2,30 +2,43 @@ package com.example.indicpipeline;
 
 import android.content.Context;
 import android.util.Log;
-import org.json.JSONArray;
 import org.json.JSONObject;
+import org.vosk.Model;
+import org.vosk.Recognizer;
 import java.io.File;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.FloatBuffer;
-import java.nio.LongBuffer;
-import java.util.HashMap;
-import java.util.Map;
-import ai.onnxruntime.OnnxTensor;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import ai.onnxruntime.OrtEnvironment;
-import ai.onnxruntime.OrtSession;
+import com.k2fsa.sherpa.onnx.FeatureConfig;
+import com.k2fsa.sherpa.onnx.OnlineModelConfig;
+import com.k2fsa.sherpa.onnx.OnlineRecognizer;
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig;
+import com.k2fsa.sherpa.onnx.OnlineStream;
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig;
 
+/**
+ * ASR engine with two backends (same approach as the standalone asrapp):
+ *  - Hindi ("hi") and Gujarati ("gu"): Vosk (Kaldi) small models
+ *  - Bengali ("bn"): sherpa-onnx streaming Zipformer2 transducer
+ *
+ * Only one language model is kept in memory at a time; call
+ * {@link #setLanguage(String)} to (pre)load a language.
+ */
 public class AsrEngine {
     private static final String TAG = "ASR";
     private static final int SAMPLE_RATE = 16000;
-    private static final int N_MELS = 80;
-    private static final int FULL_VOCAB = 5633;
+
+    private static final String ASR_DIR = "asr";
+    private static final String VOSK_HINDI = ASR_DIR + "/hindi";
+    private static final String VOSK_GUJARATI = ASR_DIR + "/gujarati";
+    private static final String SHERPA_BENGALI = ASR_DIR + "/bengali";
 
     private final Context appCtx;
-    private final OrtEnvironment env; // Shared
-    private final OrtSession encoder;
-    private final OrtSession ctcDecoder;
-    private final int blankId;
+
+    private String currentLang = null;
+    private Model voskModel;
+    private OnlineRecognizer sherpaRecognizer;
 
     public static class Result {
         public final String text;
@@ -36,212 +49,234 @@ public class AsrEngine {
         }
     }
 
-    public AsrEngine(Context ctx, OrtEnvironment sharedEnv) throws Exception {
+    public AsrEngine(Context ctx, OrtEnvironment unusedSharedEnv) {
         appCtx = ctx.getApplicationContext();
-        env = sharedEnv; // USING SHARED ENV HERE
+        Log.i(TAG, "AsrEngine created (models load lazily per language)");
+    }
 
-        File modelDir = AssetUtils.copyAsrAssetsToFiles(appCtx);
-        String encoderPath = new File(modelDir, "encoder.onnx").getAbsolutePath();
-        String ctcPath = new File(modelDir, "ctc_decoder.onnx").getAbsolutePath();
+    /** Loads the model for the given language ("hi", "gu", "bn"), releasing the previous one. */
+    public synchronized void setLanguage(String lang) throws Exception {
+        if (lang.equals(currentLang)) return;
 
-        OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
-        opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT);
+        releaseModels();
+        long t0 = System.currentTimeMillis();
 
-        encoder = env.createSession(encoderPath, opts);
-        ctcDecoder = env.createSession(ctcPath, opts);
+        switch (lang) {
+            case "hi":
+                voskModel = loadVoskModel(VOSK_HINDI, "model-hi");
+                break;
+            case "gu":
+                voskModel = loadVoskModel(VOSK_GUJARATI, "model-gu");
+                break;
+            case "bn":
+                sherpaRecognizer = loadSherpaRecognizer();
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported ASR language: " + lang);
+        }
 
-        int tmpBlank = 0;
-        try {
-            JSONObject cfg = DecodeUtils.readAssetJson(appCtx, "asr/config.json");
-            tmpBlank = cfg.optInt("BLANK_ID", 0);
-        } catch (Exception e) { tmpBlank = 0; }
-        blankId = tmpBlank;
-        Log.i(TAG, "AsrEngine init OK. BLANK_ID=" + blankId);
+        currentLang = lang;
+        Log.i(TAG, "Loaded ASR model for '" + lang + "' in " + (System.currentTimeMillis() - t0) + " ms");
     }
 
     public Result transcribe(short[] pcm16, String lang) throws Exception {
         long t0 = System.nanoTime();
-        float[] wav = pcm16ToFloat(pcm16);
-        float[][] featsTx80 = FbankJNI.computeFbank80(wav, SAMPLE_RATE);
+        setLanguage(lang);
 
-        if (featsTx80 == null || featsTx80.length == 0) {
-            return new Result("", (System.nanoTime() - t0) / 1e6);
+        String text;
+        if ("bn".equals(lang)) {
+            text = transcribeSherpa(pcm16);
+        } else {
+            text = transcribeVosk(pcm16);
         }
-
-        int T = featsTx80.length;
-        float[][] melByT = new float[N_MELS][T];
-        for (int t = 0; t < T; t++) {
-            for (int m = 0; m < N_MELS; m++) melByT[m][t] = featsTx80[t][m];
-        }
-
-        cmvnInPlace(melByT);
-
-        float[] featsFlat = new float[1 * N_MELS * T];
-        int idx = 0;
-        for (int m = 0; m < N_MELS; m++) {
-            for (int t = 0; t < T; t++) featsFlat[idx++] = melByT[m][t];
-        }
-
-        ByteBuffer audioBB = ByteBuffer.allocateDirect(featsFlat.length * 4).order(ByteOrder.nativeOrder());
-        FloatBuffer audioFB = audioBB.asFloatBuffer();
-        audioFB.put(featsFlat);
-        audioFB.rewind();
-
-        ByteBuffer lenBB = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
-        LongBuffer lenLB = lenBB.asLongBuffer();
-        lenLB.put((long) T);
-        lenLB.rewind();
-
-        long[] audioShape = new long[]{1, N_MELS, T};
-        long[] lenShape = new long[]{1};
-
-        try (OnnxTensor audioTensor = OnnxTensor.createTensor(env, audioFB, audioShape);
-             OnnxTensor lenTensor = OnnxTensor.createTensor(env, lenLB, lenShape)) {
-
-            Map<String, OnnxTensor> encIn = new HashMap<>();
-            encIn.put("audio_signal", audioTensor);
-            encIn.put("length", lenTensor);
-
-            OrtSession.Result encRes = encoder.run(encIn);
-            float[][][] encOut = (float[][][]) encRes.get(0).getValue();
-
-            try (OnnxTensor encTensor = OnnxTensor.createTensor(env, encOut)) {
-                Map<String, OnnxTensor> ctcIn = new HashMap<>();
-                ctcIn.put("encoder_output", encTensor);
-
-                OrtSession.Result ctcRes = ctcDecoder.run(ctcIn);
-                float[][][] logits = normalizeLogitsToBTv(ctcRes.get(0).getValue());
-                float[][] logitsTFull = logits[0];
-
-                LangPack lp = loadLangPack(lang);
-                float[][] logitsLang = applyMask(logitsTFull, lp.maskBool);
-
-                int[] path = argmaxPerFrame(logitsLang);
-                int[] collapsed = uniqueConsecutive(path);
-                String rawText = tokensToText(collapsed, lp.vocab, blankId);
-                String finalText = PipeJoinDecode.decode(rawText);
-
-                ctcRes.close();
-                encRes.close();
-                return new Result(finalText, (System.nanoTime() - t0) / 1e6);
-            }
-        }
+        return new Result(text, (System.nanoTime() - t0) / 1e6);
     }
 
-    private static float[] pcm16ToFloat(short[] pcm) {
-        float[] out = new float[pcm.length];
-        for (int i = 0; i < pcm.length; i++) out[i] = pcm[i] / 32768f;
-        return out;
-    }
-
-    private static void cmvnInPlace(float[][] melByT) {
-        int M = melByT.length;
-        int T = melByT[0].length;
-        for (int m = 0; m < M; m++) {
-            double sum = 0;
-            for (int t = 0; t < T; t++) sum += melByT[m][t];
-            double mean = sum / T;
-            double var = 0;
-            for (int t = 0; t < T; t++) {
-                double d = melByT[m][t] - mean;
-                var += d * d;
-            }
-            double std = Math.sqrt(var / T);
-            if (std < 1e-5) std = 1e-5;
-            for (int t = 0; t < T; t++) melByT[m][t] = (float) ((melByT[m][t] - mean) / std);
+    public synchronized void releaseModels() {
+        if (voskModel != null) {
+            voskModel.close();
+            voskModel = null;
         }
+        if (sherpaRecognizer != null) {
+            sherpaRecognizer.release();
+            sherpaRecognizer = null;
+        }
+        currentLang = null;
     }
 
-    private static float[][][] normalizeLogitsToBTv(Object raw) {
-        float[][][] x = (float[][][]) raw;
-        if (x[0].length == FULL_VOCAB) {
-            float[][][] y = new float[x.length][x[0][0].length][FULL_VOCAB];
-            for (int b = 0; b < x.length; b++) {
-                for (int v = 0; v < FULL_VOCAB; v++) {
-                    for (int t = 0; t < x[0][0].length; t++) y[b][t][v] = x[b][v][t];
+    // ---------- Vosk (Hindi / Gujarati) ----------
+
+    private Model loadVoskModel(String assetDir, String targetDirName) throws Exception {
+        File targetDir = syncVoskAssets(assetDir, targetDirName);
+        return new Model(targetDir.getAbsolutePath());
+    }
+
+    /**
+     * Vosk needs real filesystem paths, so the model is copied from assets to
+     * filesDir once. The model's "uuid" file is used to detect stale copies.
+     */
+    private File syncVoskAssets(String assetDir, String targetDirName) throws Exception {
+        File targetDir = new File(appCtx.getFilesDir(), targetDirName);
+        File uuidFile = new File(targetDir, "uuid");
+
+        String assetUuid = readAssetText(assetDir + "/uuid");
+        if (uuidFile.exists() && assetUuid.equals(readFileText(uuidFile))) {
+            return targetDir; // already unpacked and up to date
+        }
+
+        deleteRecursively(targetDir);
+        copyAssetDir(assetDir, targetDir);
+        return targetDir;
+    }
+
+    private String transcribeVosk(short[] pcm16) throws Exception {
+        Model model = voskModel;
+        if (model == null) return "";
+
+        byte[] pcm = shortsToBytes(pcm16);
+        Recognizer rec = new Recognizer(model, (float) SAMPLE_RATE);
+        try {
+            StringBuilder sb = new StringBuilder();
+            int chunk = 8000; // ~0.25s of 16-bit/16kHz audio per accept call
+            int offset = 0;
+            while (offset < pcm.length) {
+                int len = Math.min(chunk, pcm.length - offset);
+                byte[] slice = new byte[len];
+                System.arraycopy(pcm, offset, slice, 0, len);
+                if (rec.acceptWaveForm(slice, len)) {
+                    String piece = new JSONObject(rec.getResult()).optString("text", "");
+                    if (!piece.isEmpty()) sb.append(piece).append(' ');
                 }
+                offset += len;
             }
-            return y;
+            String finalPiece = new JSONObject(rec.getFinalResult()).optString("text", "");
+            if (!finalPiece.isEmpty()) sb.append(finalPiece);
+            return sb.toString().trim();
+        } finally {
+            rec.close();
         }
-        return x;
     }
 
-    private static float[][] applyMask(float[][] logitsTV, boolean[] maskBool5633) {
-        int T = logitsTV.length;
-        int outV = 0;
-        for (boolean b : maskBool5633) if (b) outV++;
-        float[][] out = new float[T][outV];
-        for (int t = 0; t < T; t++) {
-            int j = 0;
-            for (int v = 0; v < maskBool5633.length; v++) {
-                if (maskBool5633[v]) out[t][j++] = logitsTV[t][v];
+    // ---------- sherpa-onnx (Bengali) ----------
+
+    private OnlineRecognizer loadSherpaRecognizer() {
+        FeatureConfig feat = new FeatureConfig();
+        feat.setSampleRate(SAMPLE_RATE);
+        feat.setFeatureDim(80);
+
+        OnlineTransducerModelConfig transducer = new OnlineTransducerModelConfig();
+        transducer.setEncoder(SHERPA_BENGALI + "/encoder.onnx");
+        transducer.setDecoder(SHERPA_BENGALI + "/decoder.onnx");
+        transducer.setJoiner(SHERPA_BENGALI + "/joiner.onnx");
+
+        OnlineModelConfig model = new OnlineModelConfig();
+        model.setTransducer(transducer);
+        model.setTokens(SHERPA_BENGALI + "/tokens.txt");
+        model.setNumThreads(2);
+        model.setModelType("zipformer2");
+
+        OnlineRecognizerConfig config = new OnlineRecognizerConfig();
+        config.setFeatConfig(feat);
+        config.setModelConfig(model);
+        config.setDecodingMethod("greedy_search");
+        config.setEnableEndpoint(false);
+
+        return new OnlineRecognizer(appCtx.getAssets(), config);
+    }
+
+    private String transcribeSherpa(short[] pcm16) {
+        OnlineRecognizer recognizer = sherpaRecognizer;
+        if (recognizer == null) return "";
+
+        float[] samples = shortsToFloats(pcm16);
+        OnlineStream stream = recognizer.createStream("");
+        try {
+            stream.acceptWaveform(samples, SAMPLE_RATE);
+            // Tail padding so the decoder flushes the last words
+            stream.acceptWaveform(new float[SAMPLE_RATE], SAMPLE_RATE);
+            stream.inputFinished();
+            while (recognizer.isReady(stream)) {
+                recognizer.decode(stream);
             }
+            return recognizer.getResult(stream).getText().trim();
+        } finally {
+            stream.release();
+        }
+    }
+
+    // ---------- helpers ----------
+
+    private static byte[] shortsToBytes(short[] pcm16) {
+        byte[] out = new byte[pcm16.length * 2];
+        for (int i = 0; i < pcm16.length; i++) {
+            out[i * 2] = (byte) (pcm16[i] & 0xff);
+            out[i * 2 + 1] = (byte) ((pcm16[i] >> 8) & 0xff);
         }
         return out;
     }
 
-    private static int[] argmaxPerFrame(float[][] logitsTV) {
-        int[] path = new int[logitsTV.length];
-        for (int t = 0; t < logitsTV.length; t++) {
-            int best = 0;
-            float bestVal = logitsTV[t][0];
-            for (int v = 1; v < logitsTV[0].length; v++) {
-                if (logitsTV[t][v] > bestVal) {
-                    bestVal = logitsTV[t][v];
-                    best = v;
-                }
-            }
-            path[t] = best;
+    private static float[] shortsToFloats(short[] pcm16) {
+        float[] out = new float[pcm16.length];
+        for (int i = 0; i < pcm16.length; i++) {
+            out[i] = pcm16[i] / 32768.0f;
         }
-        return path;
-    }
-
-    private static int[] uniqueConsecutive(int[] arr) {
-        if (arr.length == 0) return new int[0];
-        int[] tmp = new int[arr.length];
-        int n = 0, prev = arr[0];
-        tmp[n++] = prev;
-        for (int i = 1; i < arr.length; i++) {
-            if (arr[i] != prev) {
-                prev = arr[i];
-                tmp[n++] = prev;
-            }
-        }
-        int[] out = new int[n];
-        System.arraycopy(tmp, 0, out, 0, n);
         return out;
     }
 
-    private static String tokensToText(int[] ids, String[] vocab, int blankId) {
-        StringBuilder sb = new StringBuilder();
-        for (int id : ids) {
-            if (id == blankId) continue;
-            if (id >= 0 && id < vocab.length) sb.append(vocab[id]);
+    private String readAssetText(String assetPath) throws Exception {
+        try (InputStream in = appCtx.getAssets().open(assetPath)) {
+            return streamToString(in);
         }
-        return sb.toString().replace("▁", " ").trim().replaceAll("\\s+", " ");
     }
 
-    private static class LangPack {
-        final String[] vocab;
-        final boolean[] maskBool;
-        LangPack(String[] v, boolean[] m) { vocab = v; maskBool = m; }
+    private static String readFileText(File file) throws Exception {
+        try (InputStream in = new java.io.FileInputStream(file)) {
+            return streamToString(in);
+        }
     }
 
-    private LangPack loadLangPack(String lang) throws Exception {
-        JSONObject vocabJson = DecodeUtils.readAssetJson(appCtx, "asr/vocab.json");
-        JSONObject masksJson = DecodeUtils.readAssetJson(appCtx, "asr/language_masks.json");
+    private static String streamToString(InputStream in) throws Exception {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
+        return bos.toString("UTF-8").trim();
+    }
 
-        JSONArray vArr = vocabJson.getJSONArray(lang);
-        String[] v = new String[vArr.length()];
-        for (int i = 0; i < vArr.length(); i++) v[i] = vArr.getString(i);
-
-        JSONArray mArr = masksJson.getJSONArray(lang);
-        boolean[] mask = new boolean[mArr.length()];
-        for (int i = 0; i < mArr.length(); i++) {
-            Object o = mArr.get(i);
-            if (o instanceof Boolean) mask[i] = (Boolean) o;
-            else mask[i] = (mArr.getInt(i) != 0);
+    private void copyAssetDir(String assetPath, File destDir) throws Exception {
+        String[] children = appCtx.getAssets().list(assetPath);
+        if (children == null || children.length == 0) {
+            copyAssetFile(assetPath, destDir);
+            return;
         }
-        return new LangPack(v, mask);
+        if (!destDir.exists() && !destDir.mkdirs()) {
+            throw new Exception("Cannot create directory: " + destDir);
+        }
+        for (String child : children) {
+            copyAssetDir(assetPath + "/" + child, new File(destDir, child));
+        }
+    }
+
+    private void copyAssetFile(String assetPath, File destFile) throws Exception {
+        File parent = destFile.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new Exception("Cannot create directory: " + parent);
+        }
+        try (InputStream in = appCtx.getAssets().open(assetPath);
+             OutputStream out = new FileOutputStream(destFile)) {
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+        }
+    }
+
+    private static void deleteRecursively(File f) {
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursively(c);
+            }
+        }
+        f.delete();
     }
 }

@@ -9,16 +9,7 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size
 find_library(log-lib log)
 
 # ==========================================
-# 1. FBANK (ASR Model Feature Extractor)
-# ==========================================
-add_library(fbank SHARED
-        fbank_jni.cpp
-        fbank.cpp
-)
-target_link_libraries(fbank ${log-lib})
-
-# ==========================================
-# 2. SENTENCEPIECE (Translation Model Tokenizer)
+# SENTENCEPIECE (Translation Model Tokenizer)
 # ==========================================
 include(FetchContent)
 FetchContent_Declare(

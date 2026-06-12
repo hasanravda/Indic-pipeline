@@ -7,7 +7,9 @@ appcompat = "1.7.1"
 material = "1.13.0"
 activity = "1.12.4"
 constraintlayout = "2.2.1"
-onnxruntimeAndroid = "1.17.1"
+# Must stay at 1.24.3: the bundled sherpa-onnx 1.13.2 JNI libs link against
+# the versioned symbol OrtGetApiBase@VERS_1.24.3 from this exact release.
+onnxruntimeAndroid = "1.24.3"
 sherpaOnnx = "1.13.2"
 
 
